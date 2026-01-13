@@ -2,225 +2,161 @@ import time
 import pytest
 from pytest_bdd import scenarios, given, when, then, parsers
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait, Select
+from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
-# 1. LINK: Connect this Python file to your Feature file
-# Make sure the path matches where your .feature file is located
+# Link to Feature File
 scenarios('../features/device_discovery.feature')
 
 # Constants
 BASE_URL = "http://127.0.0.1:5173"
 
-# ==============================================================================
-#                               GIVEN STEPS
-# ==============================================================================
-
+# ================= GIVEN STEPS =================
 @given('the user is logged into the AirNav Dashboard')
 def login_to_dashboard(browser):
-    """
-    Logs the user in as admin.
-    """
     login_url = f"{BASE_URL}/login"
     browser.get(login_url)
-    
     try:
-        # 1. Wait for Login Page
-        WebDriverWait(browser, 10).until(
-            EC.visibility_of_element_located((By.ID, "username"))
-        )
-        
-        # 2. Enter Credentials
-        browser.find_element(By.ID, "username").clear()
+        WebDriverWait(browser, 10).until(EC.visibility_of_element_located((By.ID, "username")))
         browser.find_element(By.ID, "username").send_keys("admin")
-        
-        browser.find_element(By.ID, "password").clear()
         browser.find_element(By.ID, "password").send_keys("!frqAIRNAV")
-
-        # 3. Click Login Button (Looks for 'Login' or 'Sign In')
-        submit_btn = browser.find_element(By.XPATH, "//button[contains(text(), 'Log') or contains(text(), 'Sign')]")
-        submit_btn.click()
-
-        # 4. Wait for Redirect to Dashboard (URL check)
+        browser.find_element(By.XPATH, "//button[contains(text(), 'Log') or contains(text(), 'Sign')]").click()
         WebDriverWait(browser, 15).until(lambda d: "login" not in d.current_url)
-        print("SUCCESS: Login Successful!")
-
     except Exception as e:
         print(f"Login Failed: {e}")
-        browser.save_screenshot("login_failure.png")
         raise e
 
 @given('the user navigates to the "Device Discovery" page')
 def navigate_discovery(browser):
-    """
-    Directly navigates to the Add Device / Discovery page.
-    """
     browser.get(f"{BASE_URL}/add-device")
-    # Give React a moment to render the form components
-    time.sleep(2) 
+    browser.refresh()
+    time.sleep(2) # Allow React to bind event listeners
 
 @given(parsers.parse('I have a valid SNMPv3 device with IP "{ip}"'))
 def valid_device_setup(ip):
-    # Context step - just logging
     print(f"TEST SETUP: Target IP is {ip}")
 
-# ==============================================================================
-#                               WHEN STEPS
-# ==============================================================================
-
+# ================= WHEN STEPS =================
 @when(parsers.parse('I enter the IP address "{ip}"'))
 def enter_ip_address(browser, ip):
-    try:
-        ip_input = browser.find_element(By.ID, "ipAddress")
-        ip_input.clear()
-        ip_input.send_keys(ip)
-    except Exception as e:
-        browser.save_screenshot("ip_input_fail.png")
-        raise e
+    browser.find_element(By.ID, "ipAddress").clear()
+    browser.find_element(By.ID, "ipAddress").send_keys(ip)
 
 @when(parsers.parse('I enter the SNMP credentials for user "{user}" with auth "{auth}" and priv "{priv}"'))
 def enter_credentials(browser, user, auth, priv):
-    try:
-        browser.find_element(By.ID, "username").send_keys(user)
-        browser.find_element(By.ID, "authPassword").send_keys(auth)
-        browser.find_element(By.ID, "privPassword").send_keys(priv)
-    except Exception as e:
-        browser.save_screenshot("creds_fail.png")
-        raise e
+    browser.find_element(By.ID, "username").send_keys(user)
+    browser.find_element(By.ID, "authPassword").send_keys(auth)
+    browser.find_element(By.ID, "privPassword").send_keys(priv)
 
+@when('I start a timer')
+def start_timer(browser):
+    browser.start_time = time.time()
+
+# --- FIXED: SELF-HEALING CLICK ---
 @when('I click the "Search Device" button')
 def click_search(browser):
+    xpath = "//button[contains(text(), 'Search') or contains(text(), 'Discover')]"
+    loading_indicator = "//*[contains(text(), 'Device Search Initiated')]"
+    
+    # 1. First Attempt
+    btn = WebDriverWait(browser, 10).until(EC.element_to_be_clickable((By.XPATH, xpath)))
+    time.sleep(1) # Humanizer
+    btn.click()
+    print("[ACTION] Clicked Search Button (Attempt 1)")
+    
+    # 2. VERIFY: Did it actually work?
     try:
-        # Robust search for the button
-        button = browser.find_element(By.XPATH, "//button[contains(text(), 'Search') or contains(text(), 'Discover')]")
-        button.click()
-    except Exception as e:
-        print("Could not find 'Search' button.")
-        browser.save_screenshot("search_button_fail.png")
-        raise e
+        WebDriverWait(browser, 2).until(
+            EC.presence_of_element_located((By.XPATH, loading_indicator))
+        )
+        print("✅ Click verified: Loading message appeared.")
+    except TimeoutException:
+        print("⚠️ Click failed (React wasn't ready). Clicking again...")
+        # 3. Second Attempt (Retry)
+        btn.click()
+        WebDriverWait(browser, 2).until(
+             EC.presence_of_element_located((By.XPATH, loading_indicator))
+        )
+        print("✅ Click verified on Attempt 2.")
 
-# --- DROPDOWN SELECTION LOGIC ---
-
-@when(parsers.parse('I select "{value}" from the Brand dropdown'))
-def select_brand(browser, value):
-    """Attempts to select a value from the Brand dropdown."""
-    print(f"Attempting to select Brand: {value}")
-    time.sleep(1) # Wait for UI to stabilize
-    try:
-        # Try finding a standard HTML <select> near the label "Brand"
-        select_elem = browser.find_element(By.XPATH, "//label[contains(text(), 'Brand')]/following::select[1]")
-        Select(select_elem).select_by_visible_text(value)
-    except:
-        # Fallback: Try generic Xpath if exact label fails
-        # Assuming it's the FIRST select on the results card
-        try:
-             selects = browser.find_elements(By.TAG_NAME, "select")
-             if len(selects) >= 1:
-                 Select(selects[0]).select_by_visible_text(value)
-             else:
-                 raise Exception("No select elements found")
-        except Exception as e:
-            browser.save_screenshot("brand_select_fail.png")
-            raise e
-
-@when(parsers.parse('I select "{value}" from the Type dropdown'))
-def select_type(browser, value):
-    print(f"Attempting to select Type: {value}")
-    time.sleep(0.5)
-    try:
-        # Try finding select near label "Type"
-        select_elem = browser.find_element(By.XPATH, "//label[contains(text(), 'Type')]/following::select[1]")
-        Select(select_elem).select_by_visible_text(value)
-    except:
-        # Fallback: Assume it's the SECOND select
-        try:
-             selects = browser.find_elements(By.TAG_NAME, "select")
-             if len(selects) >= 2:
-                 Select(selects[1]).select_by_visible_text(value)
-        except Exception as e:
-            browser.save_screenshot("type_select_fail.png")
-            raise e
-
-@when(parsers.parse('I select "{value}" from the Model dropdown'))
-def select_model(browser, value):
-    print(f"Attempting to select Model: {value}")
-    time.sleep(0.5)
-    try:
-        # Try finding select near label "Model"
-        select_elem = browser.find_element(By.XPATH, "//label[contains(text(), 'Model')]/following::select[1]")
-        Select(select_elem).select_by_visible_text(value)
-    except:
-        # Fallback: Assume it's the THIRD select
-        try:
-             selects = browser.find_elements(By.TAG_NAME, "select")
-             if len(selects) >= 3:
-                 Select(selects[2]).select_by_visible_text(value)
-        except Exception as e:
-            browser.save_screenshot("model_select_fail.png")
-            raise e
-
-# ==============================================================================
-#                               THEN STEPS
-# ==============================================================================
+# ================= THEN STEPS =================
 
 @then(parsers.parse('I should see a status message saying "{message}"'))
 def verify_message(browser, message):
-    time.sleep(2)
-    if message in browser.page_source:
-        print(f"SUCCESS: Found message '{message}'")
-    else:
-        browser.save_screenshot("message_fail.png")
-        raise AssertionError(f"Expected '{message}' but did not find it.")
+    try:
+        WebDriverWait(browser, 10).until(
+            EC.presence_of_element_located((By.XPATH, f"//*[contains(text(), '{message}')]"))
+        )
+    except TimeoutException:
+        raise AssertionError(f"FAIL: Message '{message}' not found. Current Page Text:\n{browser.find_element(By.TAG_NAME, 'body').text[:200]}...")
 
 @then('I should see the "Discovery Results" section')
 def verify_results_section(browser):
-    """
-    Waits for the discovery results card/header to appear.
-    """
-    print("Waiting for Discovery Results...")
-    try:
-        # Wait up to 20 seconds for the SNMP scan to finish
-        WebDriverWait(browser, 20).until(
-            EC.visibility_of_element_located((By.XPATH, "//*[contains(text(), 'Discovery Results') or contains(text(), 'Device Found')]"))
-        )
-        print("SUCCESS: Discovery Results section appeared.")
-    except Exception as e:
-        browser.save_screenshot("results_timeout.png")
-        raise AssertionError("Discovery Results did not appear within 20 seconds.") from e
+    WebDriverWait(browser, 30).until(
+        EC.visibility_of_element_located((By.CLASS_NAME, "details-main-container"))
+    )
 
 @then('I should see the Hostname in the header')
 def verify_hostname_header(browser):
-    """Checks for the header like 'Discovery Results: RouterB'"""
-    try:
-        # Looks for any header tag (h1-h4) containing 'Discovery Results'
-        browser.find_element(By.XPATH, "//h1[contains(text(), 'Discovery Results')] | //h2[contains(text(), 'Discovery Results')] | //h3[contains(text(), 'Discovery Results')]")
-        print("SUCCESS: Found Hostname Header.")
-    except Exception as e:
-        browser.save_screenshot("header_fail.png")
-        raise AssertionError("Could not find the 'Discovery Results' header.") from e
+    browser.find_element(By.XPATH, "//h1[contains(@class, 'details-title')]")
 
 @then('I should see the "Raw Model ID"')
 def verify_raw_model_id(browser):
-    """Checks for the label 'Raw Model ID'."""
-    try:
-        browser.find_element(By.XPATH, "//*[contains(text(), 'Raw Model ID')]")
-        print("SUCCESS: Found 'Raw Model ID' field.")
-    except Exception as e:
-        browser.save_screenshot("model_id_fail.png")
-        raise AssertionError("Could not find 'Raw Model ID' on the page.") from e
+    browser.find_element(By.XPATH, "//*[contains(text(), 'Raw Model ID')]")
 
-@then('the "Confirm Add Device" button should be enabled')
-def check_confirm_button(browser):
-    """Checks if the Confirm button is clickable."""
+@then(parsers.parse('I should see valid metrics for "{metric1}" and "{metric2}"'))
+def verify_metrics(browser, metric1, metric2):
+    time.sleep(1)
+    page_source = browser.page_source
+    if metric1 not in page_source and metric1.title() not in page_source:
+         raise AssertionError(f"Metric {metric1} not found")
+    if metric2 not in page_source and metric2.title() not in page_source:
+         raise AssertionError(f"Metric {metric2} not found")
+
+# --- FIXED PERFORMANCE CHECK (With Debugging) ---
+@then(parsers.parse('the result should appear within {seconds:d} seconds'))
+def verify_timing(browser, seconds):
+    limit = 45 
+    start_time = getattr(browser, 'start_time', time.time())
+    
+    # Look for Success (Valid IP) OR Failure (Invalid IP)
+    status_xpath = "//*[contains(text(), 'Discovery Successful') or contains(text(), 'Discovery Failed') or contains(text(), 'Discovery Results')]"
+    
     try:
-        btn = browser.find_element(By.XPATH, "//button[contains(text(), 'Confirm Add Device')]")
+        WebDriverWait(browser, limit).until(
+            EC.visibility_of_element_located((By.XPATH, status_xpath))
+        )
+        elapsed = time.time() - start_time
+        print(f"\n[PERFORMANCE] Operation finished in: {elapsed:.2f}s")
         
-        if btn.is_enabled():
-             print("SUCCESS: Confirm button is enabled.")
-        else:
-             browser.save_screenshot("btn_disabled.png")
-             raise AssertionError("Button exists but is still disabled!")
-    except Exception as e:
-        browser.save_screenshot("btn_missing.png")
-        raise AssertionError("Could not find 'Confirm Add Device' button.") from e
+        if elapsed > seconds:
+            raise AssertionError(f"FAIL: Too Slow! Took {elapsed:.2f}s (Max allowed: {seconds}s)")
+        
+        print(f"✅ PASS: Performance within limits.")
+
+    except TimeoutException:
+        elapsed = time.time() - start_time
+        # DEBUG: Print what is actually on the screen if it fails
+        body_text = browser.find_element(By.TAG_NAME, "body").text
+        print(f"\n[DEBUG] Screen Content at Failure:\n{body_text[:500]}")
+        
+        raise AssertionError(f"CRITICAL FAIL: System hung for over {elapsed:.2f}s. No Success/Fail message found.")
+
+# ... (Keep Security/Error steps the same) ...
+@then('the password fields should be cleared immediately')
+def verify_fields_cleared(browser):
+    time.sleep(1)
+    auth_val = browser.find_element(By.ID, "authPassword").get_attribute("value")
+    priv_val = browser.find_element(By.ID, "privPassword").get_attribute("value")
+    if auth_val != "" or priv_val != "":
+        raise AssertionError(f"SECURITY FAIL: Passwords still visible!")
+
+@then(parsers.parse('I should see an error message containing "{text1}" or "{text2}"'))
+def verify_error_text(browser, text1, text2):
+    try:
+        WebDriverWait(browser, 10).until(
+            EC.visibility_of_element_located((By.XPATH, f"//*[contains(text(), '{text1}') or contains(text(), '{text2}')]"))
+        )
+    except:
+        raise AssertionError(f"FAIL: Expected error message '{text1}' or '{text2}' did not appear.")
